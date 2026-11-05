@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFB Predictions</title>
+  <meta name="description" content="College football forecasts from a neural network: every FBS game simulated play by play, with team power ratings and player values." />
+  <meta name="theme-color" content="#0f1117" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏈</text></svg>" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="CFB Predictions" />
+  <meta property="og:description" content="Every FBS game simulated play by play, with team power ratings and player values from one neural network." />
+  <link rel="stylesheet" href="./style.css?v=202611051825" />
+  <meta property="og:url" content="https://cfb.sahilfarishta.com/" />
+  <meta property="og:image" content="https://cfb.sahilfarishta.com/og.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+</head>
+<body>
+  <!-- NAV -->
+  <nav class="navbar">
+    <div class="nav-brand">
+      <span class="nav-logo">🏈</span>
+      <span class="nav-title">CFB Predictions</span>
+      <span id="nav-season" class="nav-season"></span>
+    </div>
+    <div class="nav-controls">
+      <select id="week-select" class="select"></select>
+      <select id="snapshot-select" class="select"></select>
+      <button id="sync-cfbd-btn" class="btn btn-sync" title="Pull latest game scores from CFBD">
+        <span class="sync-icon">🔄</span> Sync CFBD
+      </button>
+    </div>
+    <div class="nav-tabs">
+      <a class="nav-tab" data-page="games" href="#">Games</a>
+      <a class="nav-tab" data-page="postseason" href="#">Postseason</a>
+      <a class="nav-tab" data-page="rankings" href="#">Rankings</a>
+      <a class="nav-tab" data-page="players" href="#">Players</a>
+      <a class="nav-tab" data-page="about" href="#">About</a>
+    </div>
+  </nav>
+
+  <!-- TOAST NOTIFICATION -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- PAGE CONTENT -->
+  <main id="app">
+    <div class="loading-spinner" id="global-loader">
+      <div class="spinner"></div>
+    </div>
+  </main>
+
+  <script>
+    const STATIC_MODE = true;
+    const DATA_ROOT = "./data";
+  </script>
+  <script src="./app.js?v=202611051825"></script>
+</body>
+</html>
+
