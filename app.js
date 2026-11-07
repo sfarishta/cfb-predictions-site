@@ -9,7 +9,8 @@ const state = {
   latestSnapshot: null,
   weeks: [],
   latestWeek: null,
-  currentPage: 'games',  // 'games' | 'postseason' | 'pbp' | 'rankings' | 'players' | 'about'
+  currentPage: 'games',  // 'games' | 'postseason' | 'pbp' | 'rankings' | 'players' | 'teams' | 'team' | 'about'
+  currentTeamSlug: null,
   previousPage: 'games',
   currentWeek: null,
   currentSnapshot: null,
@@ -67,9 +68,9 @@ async function init() {
   setupNavTabs();
   setupControls();
 
-  const { page, gameId, week } = parseHashRoute();
+  const { page, gameId, week, slug } = parseHashRoute();
   if (page) {
-    openRoute(page, gameId, week);
+    openRoute(page, gameId, week, slug);
   } else {
     const path = window.location.pathname.replace(/^\//, '');
     navigateTo(PAGES.includes(path) ? path : 'games');
@@ -174,18 +175,18 @@ function setupNavTabs() {
 }
 
 function setActiveTab(page) {
-  const activeTabPage = page === 'pbp' ? state.previousPage : page;
+  const activeTabPage = page === 'pbp' ? (state.previousPage === 'team' ? 'teams' : state.previousPage) : (page === 'team' ? 'teams' : page);
   document.querySelectorAll('.nav-tab').forEach(t => {
     t.classList.toggle('active', t.dataset.page === activeTabPage);
   });
   // Show week selector on games, team rankings, and player rankings
   weekSelect.style.display = (page === 'games' || page === 'rankings' || page === 'players') ? '' : 'none';
-  snapSelect.style.display = (page === 'about') ? 'none' : '';
+  snapSelect.style.display = (page === 'about' || page === 'teams' || page === 'team') ? 'none' : '';
 }
 
 // A route is `#/<page>`, or `#/pbp/<game id>/<week>` for a game (postseason games have no week). The week lets a shared
 // link find the game's card, which holds the team names, scores and win probability.
-const PAGES = ['games', 'postseason', 'rankings', 'players', 'about', 'pbp'];
+const PAGES = ['games', 'postseason', 'rankings', 'players', 'teams', 'team', 'about', 'pbp'];
 const isPostseasonId = id => id >= 900000 && id < 950000;
 
 function parseHashRoute() {
@@ -193,15 +194,19 @@ function parseHashRoute() {
   const parts = hash.split('/');
   const gameId = parts[1] ? parseInt(parts[1], 10) : null;
   const week = parts[2] ? parseInt(parts[2], 10) : null;
-  return { page: parts[0] || '', gameId: Number.isNaN(gameId) ? null : gameId, week: Number.isNaN(week) ? null : week };
+  return { page: parts[0] || '', gameId: Number.isNaN(gameId) ? null : gameId, week: Number.isNaN(week) ? null : week, slug: parts[0] === 'team' ? (parts[1] || null) : null };
 }
 
 // Open the page a link names (the hash is already in the URL). Unknown pages, such as an old bookmark, show the games.
-function openRoute(page, gameId, week) {
+function openRoute(page, gameId, week, slug = null) {
+  if (page === 'team') {
+    if (slug) { openTeam(slug, false); return; }
+    page = 'teams';
+  }
   if (!PAGES.includes(page) || (page === 'pbp' && !gameId)) page = 'games';
   if (page === 'pbp') {
-    // navigateTo records the page we came from as the back target, so name the page the link belongs to
-    state.currentPage = isPostseasonId(gameId) ? 'postseason' : 'games';
+    // navigateTo records the page we came from as the back target, so name the page the link belongs to (a game opened from a team page goes back there)
+    if (state.currentPage !== 'team') state.currentPage = isPostseasonId(gameId) ? 'postseason' : 'games';
     if (state.weeks.includes(week)) {
       state.currentWeek = week;
       weekSelect.value = week;
@@ -211,13 +216,19 @@ function openRoute(page, gameId, week) {
 }
 
 window.addEventListener('hashchange', () => {
-  const { page, gameId, week } = parseHashRoute();
+  const { page, gameId, week, slug } = parseHashRoute();
+  if (page === 'team' && slug) {
+    if (state.currentPage !== 'team' || state.currentTeamSlug !== slug) openTeam(slug, false);
+    return;
+  }
   if (page && (state.currentPage !== page || state.currentGameId !== gameId)) {
     openRoute(page, gameId, week);
   }
 });
 
 function navigateTo(page, gameId = null, gameMeta = null, updateHash = true) {
+  if (page === 'team' && state.currentTeamSlug) { openTeam(state.currentTeamSlug, updateHash); return; }
+  if (page === 'team') page = 'teams';
   if (page === 'pbp' && state.currentPage !== 'pbp') {
     state.previousPage = state.currentPage;
   }
@@ -239,8 +250,23 @@ function navigateTo(page, gameId = null, gameMeta = null, updateHash = true) {
   else if (page === 'pbp') renderPBP(gameId);
   else if (page === 'rankings') renderRankings();
   else if (page === 'players') renderPlayers();
+  else if (page === 'teams') renderTeams();
   else if (page === 'about') renderAbout();
   else renderGames();
+}
+
+// A team page is `#/team/<slug>` (slug = lower-case letters and digits joined by hyphens, as evaluation/team_pages.slug).
+function openTeam(slug, updateHash = true) {
+  if (state.currentPage !== 'team') state.previousPage = state.currentPage;
+  state.currentPage = 'team';
+  state.currentTeamSlug = slug;
+  state.currentGameId = null;
+  setActiveTab('team');
+  if (updateHash) {
+    const target = `#/team/${slug}`;
+    if (window.location.hash !== target) window.location.hash = target;
+  }
+  renderTeam(slug);
 }
 
 // ---- API helper (Dual-mode: dynamic API or static pre-rendered JSON) ----
@@ -261,6 +287,13 @@ function mapToStaticPath(apiUrl) {
   // 1. Meta
   if (path === '/api/meta') {
     return { filePath: `${STATIC_BASE}/meta.json` };
+  }
+  // 2a. Teams page: the list, and one file per team (results as of the newest ensemble week, no snapshot)
+  if (path === '/api/team_index') {
+    return { filePath: `${STATIC_BASE}/team_index.json` };
+  }
+  if (path === '/api/team_page') {
+    return { filePath: `${STATIC_BASE}/team/${encodeURIComponent(p.get('team') || '')}.json` };
   }
   // 2. Teams
   if (path.startsWith('/api/teams')) {
@@ -297,6 +330,9 @@ function mapToStaticPath(apiUrl) {
   // 8b. Offensive line units (no snapshot: they are results, not forecasts)
   if (path === '/api/rankings/ol_units') {
     return { filePath: `${STATIC_BASE}/rankings/ol_units/${weekTag || 'latest'}.json` };
+  }
+  if (path === '/api/rankings/dl_units') {
+    return { filePath: `${STATIC_BASE}/rankings/dl_units/${weekTag || 'latest'}.json` };
   }
   // 9. Player rankings
   if (path === '/api/rankings/players') {
@@ -363,6 +399,16 @@ document.addEventListener('error', e => {
   span.textContent = teamInitials(img.dataset.team || '');
   img.replaceWith(span);
 }, true);
+
+function teamSlug(name) {
+  return String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+// A school's name as a link to its team page (FBS schools only: the names the Teams page knows).
+function teamLink(name) {
+  if (!state.teams[name]) return escHtml(name);
+  return `<a class="team-link" href="#/team/${teamSlug(name)}">${escHtml(name)}</a>`;
+}
 
 // "Team by X.X" from a home-relative margin.
 function favoriteText(g, margin) {
@@ -500,14 +546,14 @@ function buildGameCard(g) {
     </div>
     <div class="game-matchup">
       <div class="team-row">
-        <span class="team-name${realAwayWon ? ' winner' : ''}">${teamLogo(g.away_team)}${escHtml(g.away_team)}</span>
+        <span class="team-name${realAwayWon ? ' winner' : ''}">${teamLogo(g.away_team)}${teamLink(g.away_team)}</span>
         <div class="score-col">
           <span class="score-sim ${modelResult}" title="${scoreTitle}">${Math.round(shownAway)}</span>
           ${isCompleted ? `<span class="score-real${realAwayWon ? ' winner' : ''}" title="Actual Real Score"><span class="score-label-sub">Final</span>${awayRealScore}</span>` : ''}
         </div>
       </div>
       <div class="team-row">
-        <span class="team-name${realHomeWon ? ' winner' : ''}">${teamLogo(g.home_team)}${escHtml(g.home_team)}</span>
+        <span class="team-name${realHomeWon ? ' winner' : ''}">${teamLogo(g.home_team)}${teamLink(g.home_team)}</span>
         <div class="score-col">
           <span class="score-sim ${modelResult}" title="${scoreTitle}">${Math.round(shownHome)}</span>
           ${isCompleted ? `<span class="score-real${realHomeWon ? ' winner' : ''}" title="Actual Real Score"><span class="score-label-sub">Final</span>${homeRealScore}</span>` : ''}
@@ -532,7 +578,7 @@ function buildGameCard(g) {
       <span>${g.neutral_site ? '🏟 Neutral' : '🏠 Home'}</span>
     </div>
   `;
-  card.addEventListener('click', () => navigateTo('pbp', g.game_id, g));
+  card.addEventListener('click', e => { if (e.target.closest('a.team-link')) return; navigateTo('pbp', g.game_id, g); });
   return card;
 }
 
@@ -631,8 +677,9 @@ async function renderPBP(gameId) {
     : Math.round((1.0 / (1.0 + Math.exp(-0.075 * (simHomeScore - simAwayScore)))) * 100);
   const awayWinPct = homeWinPct !== null ? 100 - homeWinPct : null;
 
-  const backTarget = state.previousPage === 'postseason' ? 'postseason' : 'games';
-  const backLabel = state.previousPage === 'postseason' ? '← Back to Postseason Bracket' : `← Back to Week ${state.currentWeek}`;
+  const fromTeam = state.previousPage === 'team' && state.currentTeamSlug;
+  const backTarget = fromTeam ? 'team' : (state.previousPage === 'postseason' ? 'postseason' : 'games');
+  const backLabel = fromTeam ? '← Back to team page' : (state.previousPage === 'postseason' ? '← Back to Postseason Bracket' : `← Back to Week ${state.currentWeek}`);
   const stageTitle = game?.title || game?.bowl_name || game?.stage || '';
   const awaySeedBadge = game?.away_seed ? `<span class="seed-pill">#${game.away_seed}</span> ` : '';
   const homeSeedBadge = game?.home_seed ? `<span class="seed-pill">#${game.home_seed}</span> ` : '';
@@ -656,9 +703,9 @@ async function renderPBP(gameId) {
           <div>
             ${stageTitle ? `<div class="pbp-stage-banner">🏆 ${escHtml(stageTitle)}</div>` : ''}
             <div class="pbp-teams">
-              ${awaySeedBadge}${teamLogo(awayTeam, 'team-logo team-logo-lg')}${escHtml(awayTeam)}
+              ${awaySeedBadge}${teamLogo(awayTeam, 'team-logo team-logo-lg')}${teamLink(awayTeam)}
               <span class="pbp-at">${game?.neutral_site ? 'vs' : '@'}</span>
-              ${homeSeedBadge}${teamLogo(homeTeam, 'team-logo team-logo-lg')}${escHtml(homeTeam)}
+              ${homeSeedBadge}${teamLogo(homeTeam, 'team-logo team-logo-lg')}${teamLink(homeTeam)}
             </div>
             <div class="pbp-badges">
               ${isCompleted
@@ -921,7 +968,7 @@ function renderOfficialBox(teams, awayTeam, homeTeam) {
       <section class="box-team">
         <div class="box-team-head">
           ${teamLogo(t.team, 'team-logo team-logo-lg')}
-          <h2>${escHtml(t.team)}</h2>
+          <h2>${teamLink(t.team)}</h2>
           <span class="box-team-score">${escHtml(t.points ?? '')}</span>
         </div>
         <div class="box-team-totals">
@@ -959,7 +1006,7 @@ function renderSimBox(plays, homeTeam, awayTeam, source) {
   const rows = [homeTeam, awayTeam].map(t => {
     const s = stats[t] ?? {};
     return `<tr>
-      <td><strong>${teamLogo(t, 'team-logo team-logo-sm')}${escHtml(t)}</strong></td>
+      <td><strong>${teamLogo(t, 'team-logo team-logo-sm')}${teamLink(t)}</strong></td>
       <td>${s.pass_yds ?? 0}</td>
       <td>${s.rush_yds ?? 0}</td>
       <td>${(s.pass_yds ?? 0) + (s.rush_yds ?? 0)}</td>
@@ -1025,7 +1072,7 @@ async function renderPostseason() {
       <div class="seed-chip ${isBye ? 'seed-bye' : ''}" title="Power Rating: ${escHtml(s.power_rating)}">
         <span class="seed-num">#${escHtml(s.seed)}</span>
         ${teamLogo(s.team, 'team-logo team-logo-sm')}
-        <span class="seed-team">${escHtml(s.team)}</span>
+        <span class="seed-team">${teamLink(s.team)}</span>
         ${s.record ? `<span class="seed-rec">(${escHtml(s.record)})</span>` : ''}
         <span class="seed-tag">${isBye ? 'BYE · ' + escHtml(s.conference || 'Champ') : (isChamp ? 'Champ' : 'At-Large')}</span>
       </div>
@@ -1039,7 +1086,7 @@ async function renderPostseason() {
         <div class="champion-eyebrow">${state.season} Simulated CFP National Champion</div>
         <div class="champion-name">
           ${championSeed ? `<span class="seed-pill champ-seed">#${escHtml(championSeed)}</span>` : ''}
-          ${teamLogo(champion, 'team-logo team-logo-lg')}${escHtml(champion)}
+          ${teamLogo(champion, 'team-logo team-logo-lg')}${teamLink(champion)}
         </div>
         ${champGame ? `
           <div class="champion-sub">
@@ -1122,7 +1169,8 @@ async function renderPostseason() {
   `;
 
   if (champGame) {
-    document.getElementById('champ-banner').addEventListener('click', () => {
+    document.getElementById('champ-banner').addEventListener('click', e => {
+      if (e.target.closest('a.team-link')) return;
       navigateTo('pbp', champGame.game_id, {
         ...champGame,
         title: champGame.title || 'CFP National Championship',
@@ -1183,7 +1231,7 @@ function buildBracketNode(g, subtitle, isFinal = false) {
       <div class="bracket-team-left">
         ${g.away_seed ? `<span class="seed-pill">#${escHtml(g.away_seed)}</span>` : ''}
         ${teamLogo(g.away_team, 'team-logo team-logo-sm')}
-        <span class="bracket-team-name">${escHtml(g.away_team)}</span>
+        <span class="bracket-team-name">${teamLink(g.away_team)}</span>
       </div>
       <span class="bracket-score">${Math.round(g.sim_away_score)}</span>
     </div>
@@ -1191,7 +1239,7 @@ function buildBracketNode(g, subtitle, isFinal = false) {
       <div class="bracket-team-left">
         ${g.home_seed ? `<span class="seed-pill">#${escHtml(g.home_seed)}</span>` : ''}
         ${teamLogo(g.home_team, 'team-logo team-logo-sm')}
-        <span class="bracket-team-name">${escHtml(g.home_team)}</span>
+        <span class="bracket-team-name">${teamLink(g.home_team)}</span>
         ${g.home_seed && g.home_seed <= 4 ? '<span class="bye-tag">BYE</span>' : ''}
       </div>
       <span class="bracket-score">${Math.round(g.sim_home_score)}</span>
@@ -1201,7 +1249,8 @@ function buildBracketNode(g, subtitle, isFinal = false) {
     </div>
   `;
 
-  node.addEventListener('click', () => {
+  node.addEventListener('click', e => {
+    if (e.target.closest('a.team-link')) return;
     navigateTo('pbp', g.game_id, {
       ...g,
       title: g.title || g.bowl_name || subtitle,
@@ -1234,7 +1283,7 @@ function buildPostseasonCard(g, defaultTitle) {
     <div class="game-matchup">
       <div class="team-row">
         <span class="team-name${awayWon ? ' winner' : ''}">
-          ${teamLogo(g.away_team)}${escHtml(g.away_team)}${awayRec}${awayConf}
+          ${teamLogo(g.away_team)}${teamLink(g.away_team)}${awayRec}${awayConf}
         </span>
         <div class="score-col">
           <span class="score-sim ${awayWon ? 'correct' : 'unplayed'}">${Math.round(g.sim_away_score)}</span>
@@ -1242,7 +1291,7 @@ function buildPostseasonCard(g, defaultTitle) {
       </div>
       <div class="team-row">
         <span class="team-name${homeWon ? ' winner' : ''}">
-          ${teamLogo(g.home_team)}${escHtml(g.home_team)}${homeRec}${homeConf}
+          ${teamLogo(g.home_team)}${teamLink(g.home_team)}${homeRec}${homeConf}
         </span>
         <div class="score-col">
           <span class="score-sim ${homeWon ? 'correct' : 'unplayed'}">${Math.round(g.sim_home_score)}</span>
@@ -1263,7 +1312,8 @@ function buildPostseasonCard(g, defaultTitle) {
       <span style="color:var(--accent)">Play-by-Play →</span>
     </div>
   `;
-  card.addEventListener('click', () => {
+  card.addEventListener('click', e => {
+    if (e.target.closest('a.team-link')) return;
     navigateTo('pbp', g.game_id, {
       ...g,
       title,
@@ -1402,7 +1452,7 @@ function populateCommitteeTable(rows) {
       : `${(100 * Math.max(0, 1 - (+r.sor_prob || 0))).toFixed(1)}%`;
     return `<tr>
       <td>${rankStr}</td>
-      <td><strong>${teamLogo(teamName, 'team-logo team-logo-sm')}${escHtml(teamName)}</strong></td>
+      <td><strong>${teamLogo(teamName, 'team-logo team-logo-sm')}${teamLink(teamName)}</strong></td>
       <td>${confBadge}</td>
       <td><strong>${escHtml(r.record ?? '—')}</strong></td>
       <td>${powerRank === '' ? '—' : Math.round(+powerRank)}</td>
@@ -1427,7 +1477,7 @@ function populateResumeTable(rows) {
     const powerRank = r.rank_mean ?? r.rank ?? '';
     return `<tr>
       <td><span class="rank-num">${escHtml(r.sor_rank)}</span></td>
-      <td><strong>${teamLogo(teamName, 'team-logo team-logo-sm')}${escHtml(teamName)}</strong></td>
+      <td><strong>${teamLogo(teamName, 'team-logo team-logo-sm')}${teamLink(teamName)}</strong></td>
       <td>${confBadge}</td>
       <td><strong>${escHtml(r.record ?? '—')}</strong></td>
       <td>${escHtml(r.fbs_record ?? '—')}</td>
@@ -1449,7 +1499,7 @@ function populateTeamTable(rows, isEnsemble) {
     const conf = r.conference ?? r.Conference ?? '';
     const confBadge = conf ? `<span class="conf-badge">${escHtml(conf)}</span>` : '—';
     const record = r.record ?? r.Record ?? '—';
-    const teamCell = `<strong>${teamLogo(teamName, 'team-logo team-logo-sm')}${escHtml(teamName)}</strong>`;
+    const teamCell = `<strong>${teamLogo(teamName, 'team-logo team-logo-sm')}${teamLink(teamName)}</strong>`;
 
     if (isEnsemble) {
       const lo = r.rank_lo80 ?? '—';
@@ -1483,13 +1533,17 @@ function populateTeamTable(rows, isEnsemble) {
 // ----------------------------------------------------------------
 // PAGE: PLAYERS
 // ----------------------------------------------------------------
-const POSITIONS = ['all', 'QB', 'RB', 'WR', 'TE', 'OL', 'EDGE', 'DT', 'LB', 'CB', 'S', 'K', 'P', 'RS'];
+const POSITIONS = ['all', 'QB', 'RB', 'WR', 'TE', 'OL', 'DL', 'EDGE', 'DT', 'LB', 'DB', 'CB', 'S', 'K', 'P', 'RS'];
 // Shown under the tabs where a list is much shorter than the position group (see AGENTS.md, player ranking coverage)
 const LINE_NOTE = 'Only players who hold one of the 14 slots in their team\'s offense or defense unit are ranked, and the model gives most of those to skill players, so few linemen appear. ';
 const POSITION_NOTES = {
   OL: LINE_NOTE + 'The data lists nearly all linemen as plain OL (tackle, guard and center are not split), so they share one list. The table below ranks whole lines instead.',
+  DL: LINE_NOTE + 'Every defensive lineman in one list (many schools label them all DL). The table below ranks whole defensive fronts instead.',
   EDGE: LINE_NOTE,
   DT: LINE_NOTE,
+  DB: 'Cornerbacks, safeties and defensive backs in one list: many rosters label every back plain DB, so the cornerback/safety split is not reliable across teams. The Pos column shows each player\'s roster label.',
+  CB: 'Only players the roster labels CB; schools that label every back DB are not here. See the DB list for all of them.',
+  S: 'Only players the roster labels S (or plain DB); see the DB list for the combined ranking.',
 };
 
 async function renderPlayers() {
@@ -1571,9 +1625,12 @@ async function loadPlayerTable(pos) {
 
   const badgeEl = document.getElementById('player-source-badge');
   if (badgeEl) {
+    const carried = rows[0]?.source === 'ensemble_carried';
     badgeEl.innerHTML = isEnsemble
       ? '<span class="badge badge-ensemble" title="Average of the five-seed ensemble for this week">Ensemble</span>'
-      : hasProj
+      : carried
+        ? `<span class="badge badge-ensemble" title="Per-game values are the Week ${escHtml(rows[0].values_week)} five-seed ensemble's; games played and projected games come from the season simulation. A week gets its own ensemble when its weekly run happens.">Ensemble values (Week ${escHtml(rows[0].values_week)}) · simulated games</span>`
+        : hasProj
         ? '<span class="badge badge-single" title="Projected end-of-season player values and stats from single-seed simulation">Single seed · projected final</span>'
         : '<span class="badge badge-single" title="Player values come from single model run / empirical-Bayes">Single seed · in-season</span>';
   }
@@ -1602,6 +1659,7 @@ async function loadPlayerTable(pos) {
   populatePlayerTable(rows, { isEnsemble, hasProj, hasPtsPerGame, hasGames });
   setupSortableTable('player-table');
   if (pos === 'OL') await loadOlUnits(wrap);
+  if (pos === 'DL' || pos === 'EDGE' || pos === 'DT') await loadFrontUnits(wrap);
 }
 
 // Offensive lines as units: results of the whole line, not a network output. The three measures are shown side by side and
@@ -1640,7 +1698,7 @@ async function loadOlUnits(wrap) {
         </tr></thead>
         <tbody>${rows.map(r => `<tr>
           <td><span class="rank-num">${escHtml(r.line_ypc_rank)}</span></td>
-          <td><span class="conf-badge">${teamLogo(r.team, 'team-logo team-logo-sm')}${escHtml(r.team)}</span></td>
+          <td><span class="conf-badge">${teamLogo(r.team, 'team-logo team-logo-sm')}${teamLink(r.team)}</span></td>
           <td>${(+r.line_ypc).toFixed(2)}</td>
           <td><span class="rank-num">${escHtml(r.stuff_rank)}</span></td>
           <td>${(100 * r.stuff).toFixed(1)}%</td>
@@ -1652,6 +1710,55 @@ async function loadOlUnits(wrap) {
     </div>`;
   wrap.appendChild(section);
   setupSortableTable('ol-units-table');
+}
+
+// Defensive fronts as units, the counterpart of the offensive line table: results of the whole front, not a network output.
+async function loadFrontUnits(wrap) {
+  const weekParam = state.currentWeek ? `?week=${state.currentWeek}` : '';
+  let rows;
+  try {
+    rows = await apiFetch(`/api/rankings/dl_units${weekParam}`);
+  } catch {
+    return;
+  }
+  if (!rows.length) return;
+  const through = rows[0].through_week;
+  const section = document.createElement('div');
+  section.innerHTML = `
+    <h2 class="section-title" style="margin-top: 2rem;">Defensive Front Units <span class="section-note">through Week ${escHtml(through)}</span></h2>
+    <p class="section-note" style="display: block; margin: 0 0 0.75rem;">
+      Whole fronts, not individual linemen, measured the same way as the offensive lines: adjusted for the offenses faced, pulled toward the
+      league average in proportion to how little data a team has, and shown as three separate measures (no combined score). Line yards allowed
+      per carry and stuff rate forced (carries gaining 0 or fewer yards) measure the run defense; sack rate measures the pass rush but also
+      depends on coverage and the opposing quarterback. FBS opponents only. Starters are the four defensive linemen with the most starts
+      (starts in parentheses).
+    </p>
+    <div class="rankings-table-wrap">
+      <table class="data-table" id="front-units-table">
+        <thead><tr>
+          <th data-col="ypc_rank">Run D rank</th>
+          <th data-col="team">Team</th>
+          <th data-col="ypc" title="Adjusted line yards allowed per carry (lower is better)">Line yds allowed</th>
+          <th data-col="stuff_rank">Stuff rank</th>
+          <th data-col="stuff" title="Share of opposing carries gaining 0 or fewer yards (higher is better)">Stuff rate</th>
+          <th data-col="sack_rank">Sack rank</th>
+          <th data-col="sack" title="Sacks per opposing dropback (higher is better)">Sack rate</th>
+          <th data-col="starters">Usual starters</th>
+        </tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td><span class="rank-num">${escHtml(r.line_ypc_rank)}</span></td>
+          <td><span class="conf-badge">${teamLogo(r.team, 'team-logo team-logo-sm')}${teamLink(r.team)}</span></td>
+          <td>${(+r.line_ypc).toFixed(2)}</td>
+          <td><span class="rank-num">${escHtml(r.stuff_rank)}</span></td>
+          <td>${(100 * r.stuff).toFixed(1)}%</td>
+          <td><span class="rank-num">${escHtml(r.sack_rank)}</span></td>
+          <td>${(100 * r.sack).toFixed(1)}%</td>
+          <td class="player-stats-cell">${escHtml(r.starters)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+  wrap.appendChild(section);
+  setupSortableTable('front-units-table');
 }
 
 function populatePlayerTable(rows, opts = {}) {
@@ -1689,7 +1796,7 @@ function populatePlayerTable(rows, opts = {}) {
     return `<tr>
       <td>${rankStr}</td>
       <td><strong>${escHtml(r.player ?? r.Player ?? '')}</strong></td>
-      <td><span class="conf-badge">${teamLogo(team, 'team-logo team-logo-sm')}${escHtml(team)}</span></td>
+      <td><span class="conf-badge">${teamLogo(team, 'team-logo team-logo-sm')}${teamLink(team)}</span></td>
       <td>${escHtml(r.pos ?? r.Pos ?? '')}</td>
       <td><span class="star-rating" title="${escHtml(r.stars ?? 0)} stars">${stars}</span></td>
       ${warCells}
@@ -1739,7 +1846,7 @@ function sortTable(table, col, dir) {
 function cellVal(row, idx) {
   const td = row.querySelectorAll('td')[idx];
   if (!td) return null;
-  const raw = td.textContent.trim();
+  const raw = td.textContent.trim().replace(/\u2212/g, '-');   // fmtSigned writes a true minus sign
   if (!raw || raw === '—') return null;
   const recMatch = raw.match(/^(\d+)\s*-\s*(\d+)$/);
   if (recMatch) {
@@ -1751,6 +1858,194 @@ function cellVal(row, idx) {
   const lead = raw.match(/^[+-]?\d+(\.\d+)?/);
   if (lead) return parseFloat(lead[0]);
   return raw;
+}
+
+
+// ----------------------------------------------------------------
+// PAGE: TEAMS (list) and TEAM (one school: schedule, results, predictions, performance against the model)
+// ----------------------------------------------------------------
+const fmtSigned = (v, d = 1) => (v == null || v === '' ? '—' : (+v >= 0 ? '+' : '−') + Math.abs(+v).toFixed(d));
+
+// How far a team's results sit from the model's pre-game forecasts, in words (z is points per game over its standard error).
+function performanceNote(z) {
+  if (z == null) return '';
+  const a = Math.abs(z), dir = z > 0 ? 'above' : 'below';
+  if (a < 1) return 'In line with the model';
+  if (a < 2) return `Somewhat ${dir} the model (could still be chance)`;
+  return `Well ${dir} the model (unlikely to be chance alone)`;
+}
+
+async function renderTeams() {
+  showLoader();
+  let rows;
+  try {
+    rows = await apiFetch(`/api/team_index?season=${state.season}`);
+  } catch {
+    app.innerHTML = '<div class="empty-state">The Teams page is not available yet.</div>';
+    return;
+  }
+  state.teamRows = rows;
+  const confs = [...new Set(rows.map(r => r.conference).filter(Boolean))].sort();
+  app.innerHTML = `
+    <h1 class="section-title">Teams <span class="section-note">results through the latest played week · predictions from the model</span></h1>
+    <div class="team-filters">
+      <input id="team-search" type="search" placeholder="Search teams" aria-label="Search teams" />
+      <select id="team-conf" aria-label="Conference"><option value="">All conferences</option>${confs.map(c => `<option>${escHtml(c)}</option>`).join('')}</select>
+    </div>
+    <div class="rankings-table-wrap">
+      <table class="data-table" id="teams-table">
+        <thead><tr>
+          <th data-col="team">Team</th>
+          <th data-col="conference">Conf</th>
+          <th data-col="record">Record</th>
+          <th data-col="conf_record" title="Conference record">Conf Rec</th>
+          <th data-col="projected" title="Projected final regular-season record: wins so far plus the model's win probabilities for the games left">Projected</th>
+          <th data-col="power_rank" title="Rank by power rating">Power</th>
+          <th data-col="committee_rank" title="Committee view rank">Committee</th>
+          <th data-col="pts_vs_model" title="Average points per game above (+) or below (−) the model's pre-game forecast margin">vs Model</th>
+          <th data-col="wins_vs_exp" title="Wins minus the wins the model's win probabilities implied">Wins vs Exp</th>
+          <th data-col="next">Next</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>`;
+  const draw = () => {
+    const q = document.getElementById('team-search').value.trim().toLowerCase();
+    const c = document.getElementById('team-conf').value;
+    const shown = rows.filter(r => (!q || r.team.toLowerCase().includes(q)) && (!c || r.conference === c));
+    document.querySelector('#teams-table tbody').innerHTML = shown.map(r => `<tr>
+      <td><strong>${teamLogo(r.team, 'team-logo team-logo-sm')}<a class="team-link" href="#/team/${escHtml(r.slug)}">${escHtml(r.team)}</a></strong></td>
+      <td>${escHtml(r.conference ?? '')}</td>
+      <td>${escHtml(r.record)}</td>
+      <td>${escHtml(r.conf_record)}</td>
+      <td title="${r.exp_wins != null ? 'Expected wins ' + (+r.exp_wins).toFixed(1) : ''}">${escHtml(r.projected_record)}</td>
+      <td>${r.power_rank ?? '—'}</td>
+      <td>${r.committee_rank ?? '—'}</td>
+      <td class="${r.pts_vs_model > 0 ? 'pos' : r.pts_vs_model < 0 ? 'neg' : ''}" title="${escHtml(performanceNote(r.z))}">${fmtSigned(r.pts_vs_model)}</td>
+      <td class="${r.wins_minus_exp > 0 ? 'pos' : r.wins_minus_exp < 0 ? 'neg' : ''}">${fmtSigned(r.wins_minus_exp)}</td>
+      <td>${r.next_opponent ? escHtml(`Wk ${r.next_week} ${r.next_opponent}`) : '—'}</td>
+    </tr>`).join('');
+  };
+  draw();
+  document.getElementById('team-search').addEventListener('input', draw);
+  document.getElementById('team-conf').addEventListener('change', draw);
+  setupSortableTable('teams-table');
+}
+
+function predictionCell(g) {
+  if (g.pred_margin == null) return '<td class="muted">—</td>';
+  const proj = g.pred_source === 'rating';
+  const who = g.pred_margin >= 0 ? 'Favored' : 'Underdog';
+  const tip = proj ? 'Projection from the team ratings (this game has no ensemble forecast yet)' : 'Pre-game ensemble forecast';
+  return `<td title="${tip}">${fmtSigned(g.pred_margin)} · ${Math.round(g.pred_win_prob * 100)}%${proj ? ' <span class="muted" aria-label="rating-based projection">†</span>' : ''}<div class="muted small">${who}</div></td>`;
+}
+
+async function renderTeam(slug) {
+  showLoader();
+  let t;
+  try {
+    t = await apiFetch(`/api/team_page?team=${encodeURIComponent(slug)}&season=${state.season}`);
+  } catch {
+    app.innerHTML = '<div class="empty-state">No page for this team. <a href="#/teams">All teams</a></div>';
+    return;
+  }
+  const r = t.ratings, p = t.performance, s = t.stats;
+  const rankTxt = v => (v == null ? '—' : `#${v}`);
+  const fmtDate = iso => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  };
+  const rows = t.schedule.map(g => {
+    const venue = g.venue === 'home' ? 'vs' : g.venue === 'away' ? '@' : 'vs (N)';
+    const opp = g.opp_fbs && state.teams[g.opponent]
+      ? `<a class="team-link" href="#/team/${teamSlug(g.opponent)}">${escHtml(g.opponent)}</a>` : escHtml(g.opponent);
+    const oppRank = g.opp_power_rank ? ` <span class="muted small">(power #${g.opp_power_rank})</span>` : (g.opp_fbs ? '' : ' <span class="muted small">(FCS)</span>');
+    const result = g.played
+      ? `<span class="result-${g.result === 'W' ? 'w' : 'l'}">${g.result}</span> ${g.score[0]}–${g.score[1]}`
+      : `<span class="muted">${escHtml(fmtDate(g.date))}</span>`;
+    const err = g.error != null
+      ? `<span class="${g.error > 0 ? 'pos' : g.error < 0 ? 'neg' : ''}" title="Actual margin minus the pre-game forecast margin">${fmtSigned(g.error)}</span>` : '<span class="muted">—</span>';
+    const sim = g.sim_score
+      ? `<a href="#/pbp/${g.game_id}/${g.week}" title="Open the simulated game">${g.sim_score[0]}–${g.sim_score[1]}</a>` : '<span class="muted">—</span>';
+    return `<tr>
+      <td>${g.week}</td>
+      <td>${escHtml(fmtDate(g.date))}</td>
+      <td>${venue} ${teamLogo(g.opponent, 'team-logo team-logo-sm')}${opp}${oppRank}${g.conference_game ? ' <span class="conf-pill" title="Conference game">C</span>' : ''}</td>
+      <td>${result}</td>
+      ${predictionCell(g)}
+      <td>${sim}</td>
+      <td>${err}</td>
+    </tr>`;
+  }).join('');
+  const players = t.top_by_position.map(x => x.name == null
+    ? `<tr class="muted"><td>${escHtml(x.group)}</td><td colspan="3" title="No player at this position on this team has a value (linemen are valued only where they hold a pooling slot)">—</td></tr>`
+    : `<tr><td>${x.slot > 1 ? '' : escHtml(x.group)}</td><td><strong>${escHtml(x.name)}</strong>${x.pos !== x.group ? ` <span class="muted small">${escHtml(x.pos)}</span>` : ''}</td>
+      <td>${(+x.war).toFixed(2)}${x.sd != null ? ` <span class="muted small">± ${(+x.sd).toFixed(2)}</span>` : ''}</td><td>#${x.rank} <span class="muted small">of ${x.of}</span></td></tr>`).join('');
+  const unitRow = (label, u) => !u ? '' : `<tr><td><strong>${label}</strong></td>
+      <td>${(+u.line_ypc).toFixed(2)} <span class="muted small">#${u.line_ypc_rank}</span></td>
+      <td>${(100 * u.stuff).toFixed(1)}% <span class="muted small">#${u.stuff_rank}</span></td>
+      <td>${(100 * u.sack).toFixed(1)}% <span class="muted small">#${u.sack_rank}</span></td>
+      <td class="player-stats-cell">${escHtml(u.starters)}</td></tr>`;
+  const lineUnits = t.lines && (t.lines.ol || t.lines.dl) ? `
+    <h2 class="section-title">Lines <span class="section-note">through Week ${t.lines.through_week} · rank among FBS teams</span></h2>
+    <div class="rankings-table-wrap team-schedule-wrap"><table class="data-table"><thead><tr>
+      <th>Unit</th>
+      <th title="Offense: adjusted line yards per carry (higher is better). Defense: line yards allowed (lower is better).">Line yards</th>
+      <th title="Offense: share of carries gaining 0 or less (lower is better). Defense: share of opposing carries stuffed (higher is better).">Stuff rate</th>
+      <th title="Offense: sacks allowed per dropback (lower is better; also depends on the quarterback). Defense: sacks per opposing dropback (higher is better; also depends on coverage).">Sack rate</th>
+      <th>Usual starters</th></tr></thead>
+      <tbody>${unitRow('Offensive line', t.lines.ol)}${unitRow('Defensive front', t.lines.dl)}</tbody></table></div>
+    <p class="section-note small">Whole units, opponent-adjusted and shrunk toward the league average; three separate measures, no combined score and no individual lineman values (the data cannot separate them). Starters are the linemen with the most starts. The full tables are under Players, OL and DL.</p>` : '';
+  const absences = t.absences.length ? t.absences.map(x => `<tr><td><strong>${escHtml(x.name)}</strong></td><td>${escHtml(x.pos ?? '')}</td>
+      <td>${x.status === 'carried_forward' ? 'Out (from last game)' : x.status === 'out' ? 'Out' : 'Questionable'}</td>
+      <td>${x.war == null ? '—' : (+x.war).toFixed(2)}</td></tr>`).join('') : '';
+  app.innerHTML = `
+    <div class="team-head">
+      ${teamLogo(t.team, 'team-logo team-logo-lg')}
+      <div>
+        <h1 class="section-title" style="margin:0">${escHtml(t.team)}</h1>
+        <div class="muted">${escHtml(t.conference ?? '')} · <a href="#/teams">All teams</a></div>
+      </div>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-label">Record</div><div class="stat-value">${escHtml(t.record.overall)}</div><div class="muted small">Conference ${escHtml(t.record.conference)}</div></div>
+      <div class="stat-card" title="Wins so far plus the model's win probabilities for the games left"><div class="stat-label">Projected</div><div class="stat-value">${escHtml(t.projected.record)}</div><div class="muted small">Expected wins ${t.projected.exp_wins != null ? (+t.projected.exp_wins).toFixed(1) : '—'}</div></div>
+      <div class="stat-card"><div class="stat-label">Power rating</div><div class="stat-value">${r.power != null ? (+r.power).toFixed(1) : '—'}</div><div class="muted small">${rankTxt(r.power_rank)} · committee ${rankTxt(r.committee_rank)} · résumé ${rankTxt(r.sor_rank)}</div></div>
+      <div class="stat-card" title="Average of actual margin minus the pre-game forecast margin, over the games that had a published forecast"><div class="stat-label">Vs the model</div>
+        <div class="stat-value ${p.pts_vs_model > 0 ? 'pos' : p.pts_vs_model < 0 ? 'neg' : ''}">${fmtSigned(p.pts_vs_model)}</div>
+        <div class="muted small">pts per game over ${p.games} games · ${escHtml(performanceNote(p.z))}</div></div>
+      <div class="stat-card"><div class="stat-label">Wins vs expected</div><div class="stat-value">${p.wins} vs ${p.exp_wins ?? '—'}</div><div class="muted small">Close games (≤ ${p.close_margin} pts) ${p.close_w}-${p.close_l}</div></div>
+      <div class="stat-card"><div class="stat-label">Scoring</div><div class="stat-value">${s.ppg ?? '—'} – ${s.papg ?? '—'}</div><div class="muted small">points for – against per game</div></div>
+      <div class="stat-card"><div class="stat-label">Offense</div><div class="stat-value">${s.off_ypp ?? '—'}</div><div class="muted small">yards per play${s.off_ypp_rank ? ` · #${s.off_ypp_rank} of FBS` : ''}</div></div>
+      <div class="stat-card"><div class="stat-label">Defense</div><div class="stat-value">${s.def_ypp ?? '—'}</div><div class="muted small">yards allowed per play${s.def_ypp_rank ? ` · #${s.def_ypp_rank} of FBS` : ''} · turnover margin ${s.to_margin_pg != null ? fmtSigned(s.to_margin_pg, 2) : '—'}/g</div></div>
+    </div>
+    <h2 class="section-title">Schedule and results</h2>
+    <div class="rankings-table-wrap team-schedule-wrap">
+      <table class="data-table" id="team-schedule">
+        <thead><tr>
+          <th>Wk</th><th>Date</th><th>Opponent</th><th>Result</th>
+          <th title="Predicted margin for this team and its win probability. Played games show the pre-game forecast; later games show a projection from the team ratings (†).">Predicted</th>
+          <th title="One simulated game from the model (the score on the Games page); open it for the play-by-play">Simulated game</th>
+          <th title="Actual margin minus the pre-game forecast margin">Result vs forecast</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <p class="section-note small">Predicted = margin and win probability from this team's side. † Rating-based projection, from the same team ratings as the Rankings page; games already played and the current week use the five-seed forecast made before kickoff. The simulated game is one play-by-play simulation, not the expected score.</p>
+    ${lineUnits}
+    <div class="team-cols">
+      <div>
+        <h2 class="section-title">Top player at each position <span class="section-note">CF WAR, Week ${t.as_of_week} ensemble · rank among all valued players at the position</span></h2>
+        <div class="rankings-table-wrap team-schedule-wrap"><table class="data-table"><thead><tr><th>Pos</th><th>Player</th><th>CF WAR</th><th>Rank</th></tr></thead><tbody>${players}</tbody></table></div>
+        <p class="section-note small">Same groups and ranks as the Players tab. Kickers, punters and returners come from the special-teams model. Linemen have a value only where they hold a pooling slot, so most teams show none; defensive line and defensive backs show the top two, with each player's roster label.</p>
+      </div>
+      <div>
+        <h2 class="section-title">Availability <span class="section-note">for the next game</span></h2>
+        ${absences ? `<div class="rankings-table-wrap"><table class="data-table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>CF WAR</th></tr></thead><tbody>${absences}</tbody></table></div>`
+          : '<p class="muted">No reported absences for this team.</p>'}
+      </div>
+    </div>`;
+  setupSortableTable('team-schedule');
 }
 
 // ----------------------------------------------------------------
