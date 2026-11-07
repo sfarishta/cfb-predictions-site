@@ -294,6 +294,10 @@ function mapToStaticPath(apiUrl) {
   if (path === '/api/rankings/teams') {
     return { filePath: `${STATIC_BASE}/rankings/teams/${weekTag ? weekTag + '_' : ''}${snapTag}.json` };
   }
+  // 8b. Offensive line units (no snapshot: they are results, not forecasts)
+  if (path === '/api/rankings/ol_units') {
+    return { filePath: `${STATIC_BASE}/rankings/ol_units/${weekTag || 'latest'}.json` };
+  }
   // 9. Player rankings
   if (path === '/api/rankings/players') {
     const pos = (p.get('pos') || 'all').toLowerCase();
@@ -375,6 +379,17 @@ function marketCompareLine(g) {
     <div class="market-compare" title="Blend = model + β × (line − model), β = ${g.blend_beta?.toFixed(2)} fit on earlier weeks' forecasts">
       <span class="${active === 'free' ? 'active' : ''}">Model: ${favoriteText(g, g.model_margin)}</span>
       <span class="${active === 'blend' ? 'active' : ''}">Blended: ${favoriteText(g, g.blend_margin)}</span>
+    </div>`;
+}
+
+// Blended cards show a projected score that is not a simulated game; this line says so and gives the simulated (market-free) game
+// the play-by-play and box score belong to, e.g. "Blended projection 27–13 · Simulated game 27–14".
+function scoreSourceLine(g) {
+  if (state.forecastMode !== 'blend' || g.blend_home_score == null || g.sim_home_score == null) return '';
+  return `
+    <div class="score-source" title="The blended score is model + β × (line − model), a projection. The play-by-play and box score open the market-free simulated game.">
+      Blended projection ${Math.round(g.blend_away_score)}–${Math.round(g.blend_home_score)} &nbsp;·&nbsp;
+      Simulated game ${Math.round(g.sim_away_score)}–${Math.round(g.sim_home_score)} (market-free)
     </div>`;
 }
 
@@ -499,6 +514,7 @@ function buildGameCard(g) {
         </div>
       </div>
     </div>
+    ${scoreSourceLine(g)}
     ${marketCompareLine(g)}
     ${homeWinPct !== null ? `
       <div class="win-prob-label">
@@ -629,7 +645,7 @@ async function renderPBP(gameId) {
 
   const sourceBadge = source === 'actual'
     ? ''
-    : '<span class="badge badge-predicted">Simulated Play-by-Play</span>';
+    : '<span class="badge badge-predicted" title="Always the model\'s own simulated game; the market-blended score on the games page is a projection, not this game.">Market-free simulated game</span>';
 
   app.innerHTML = `
     <span class="back-link" id="back-btn">${escHtml(backLabel)}</span>
@@ -655,7 +671,7 @@ async function renderPBP(gameId) {
             ${sourceToggle}
           </div>
           <div class="pbp-score-box">
-            <div class="pbp-score-label">Simulated Final</div>
+            <div class="pbp-score-label">${source === 'actual' ? 'Model simulated final' : 'Market-free simulated game · final'}</div>
             <div class="pbp-score-block ${modelResult}">${simAwayScore} – ${simHomeScore}</div>
             ${isCompleted
               ? `<div class="pbp-score-label" style="margin-top:.4rem">Actual Final: <strong>${game.real_away_score} – ${game.real_home_score}</strong></div>`
@@ -684,6 +700,7 @@ async function renderPBP(gameId) {
         <div class="pbp-tab" data-tab="boxscore">Box Score</div>
       </div>
 
+      ${source === 'actual' ? '' : '<div class="sim-caption">Market-free simulated game</div>'}
       <div id="tab-pbp">
         ${renderDriveAccordion(drives, homeTeam, awayTeam)}
       </div>
@@ -691,6 +708,7 @@ async function renderPBP(gameId) {
         ${renderDriveSummaryTable(drives, homeTeam, awayTeam)}
       </div>
       <div id="tab-boxscore" style="display:none">
+        ${source === 'actual' ? '' : '<div class="sim-caption">Market-free simulated game box score</div>'}
         ${boxTeams.length
           ? renderOfficialBox(boxTeams, awayTeam, homeTeam)
           : renderSimBox(plays, homeTeam, awayTeam, source)}
@@ -1465,7 +1483,14 @@ function populateTeamTable(rows, isEnsemble) {
 // ----------------------------------------------------------------
 // PAGE: PLAYERS
 // ----------------------------------------------------------------
-const POSITIONS = ['all', 'QB', 'RB', 'WR', 'TE', 'OT', 'IOL', 'EDGE', 'DT', 'LB', 'CB', 'S', 'K', 'P', 'RS'];
+const POSITIONS = ['all', 'QB', 'RB', 'WR', 'TE', 'OL', 'EDGE', 'DT', 'LB', 'CB', 'S', 'K', 'P', 'RS'];
+// Shown under the tabs where a list is much shorter than the position group (see AGENTS.md, player ranking coverage)
+const LINE_NOTE = 'Only players who hold one of the 14 slots in their team\'s offense or defense unit are ranked, and the model gives most of those to skill players, so few linemen appear. ';
+const POSITION_NOTES = {
+  OL: LINE_NOTE + 'The data lists nearly all linemen as plain OL (tackle, guard and center are not split), so they share one list. The table below ranks whole lines instead.',
+  EDGE: LINE_NOTE,
+  DT: LINE_NOTE,
+};
 
 async function renderPlayers() {
   showLoader();
@@ -1493,6 +1518,7 @@ async function renderPlayers() {
         </select>
       </div>
     </div>
+    <p id="pos-note" class="section-note" style="display: block; margin: 0 0 0.75rem;"></p>
     <div id="player-table-wrap"><div class="loading-spinner"><div class="spinner"></div></div></div>
   `;
 
@@ -1519,6 +1545,8 @@ async function renderPlayers() {
 
 async function loadPlayerTable(pos) {
   const wrap = document.getElementById('player-table-wrap');
+  const note = document.getElementById('pos-note');
+  if (note) note.textContent = POSITION_NOTES[pos] || '';
   wrap.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
 
   let rows;
@@ -1573,6 +1601,57 @@ async function loadPlayerTable(pos) {
 
   populatePlayerTable(rows, { isEnsemble, hasProj, hasPtsPerGame, hasGames });
   setupSortableTable('player-table');
+  if (pos === 'OL') await loadOlUnits(wrap);
+}
+
+// Offensive lines as units: results of the whole line, not a network output. The three measures are shown side by side and
+// never combined into one score.
+async function loadOlUnits(wrap) {
+  const weekParam = state.currentWeek ? `?week=${state.currentWeek}` : '';
+  let rows;
+  try {
+    rows = await apiFetch(`/api/rankings/ol_units${weekParam}`);
+  } catch {
+    return;
+  }
+  if (!rows.length) return;
+  const through = rows[0].through_week;
+  const section = document.createElement('div');
+  section.innerHTML = `
+    <h2 class="section-title" style="margin-top: 2rem;">Offensive Line Units <span class="section-note">through Week ${escHtml(through)}</span></h2>
+    <p class="section-note" style="display: block; margin: 0 0 0.75rem;">
+      Whole lines, not individual linemen: the data cannot separate one lineman's effect from his teammates'. Each measure is adjusted for the
+      defenses faced and pulled toward the league average in proportion to how little data a team has, and the three are shown separately
+      (no combined score). Line yards per carry and stuff rate (carries gaining 0 or fewer yards) measure run blocking; sack rate measures
+      pass protection but also depends on the quarterback and the offense's scheme. FBS opponents only. Starters are the five linemen with
+      the most starts (starts in parentheses).
+    </p>
+    <div class="rankings-table-wrap">
+      <table class="data-table" id="ol-units-table">
+        <thead><tr>
+          <th data-col="ypc_rank">Line yds rank</th>
+          <th data-col="team">Team</th>
+          <th data-col="ypc" title="Adjusted line yards per carry (higher is better)">Line yds/carry</th>
+          <th data-col="stuff_rank">Stuff rank</th>
+          <th data-col="stuff" title="Share of carries gaining 0 or fewer yards (lower is better)">Stuff rate</th>
+          <th data-col="sack_rank">Sack rank</th>
+          <th data-col="sack" title="Sacks per dropback (lower is better)">Sack rate</th>
+          <th data-col="starters">Usual starters</th>
+        </tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td><span class="rank-num">${escHtml(r.line_ypc_rank)}</span></td>
+          <td><span class="conf-badge">${teamLogo(r.team, 'team-logo team-logo-sm')}${escHtml(r.team)}</span></td>
+          <td>${(+r.line_ypc).toFixed(2)}</td>
+          <td><span class="rank-num">${escHtml(r.stuff_rank)}</span></td>
+          <td>${(100 * r.stuff).toFixed(1)}%</td>
+          <td><span class="rank-num">${escHtml(r.sack_rank)}</span></td>
+          <td>${(100 * r.sack).toFixed(1)}%</td>
+          <td class="player-stats-cell">${escHtml(r.starters)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+  wrap.appendChild(section);
+  setupSortableTable('ol-units-table');
 }
 
 function populatePlayerTable(rows, opts = {}) {
@@ -1750,10 +1829,12 @@ function renderAbout() {
       <section class="about-section">
         <h2>Betting lines</h2>
         <p>Spreads and totals appear on game cards for reference. The <em>Market-blended</em> option shows a second
-        forecast that moves the model part of the way toward the line, by an amount fit on earlier weeks. Ratings,
-        player values and play-by-play are always the model's own.</p>
-        <p>The one indirect use: when choosing which simulation to show for each game, the picks are balanced so the
-        week's combined points match the combined betting totals. No single game is moved toward its line.</p>
+        forecast that moves the model part of the way toward the line, by an amount fit on earlier weeks. Its score is a
+        projection, not a simulated game: each blended card also shows the simulated (market-free) game that the
+        play-by-play and box score belong to. Ratings, player values and play-by-play are always the model's own.</p>
+        <p>The one indirect use: when choosing which simulation to show for each game, the target total is the model's
+        own total adjusted by how earlier weeks' betting totals differed from the model's for each team. A game's own
+        line is never used, and nothing forces the week's points to match the betting totals.</p>
       </section>
 
       <section class="about-section">

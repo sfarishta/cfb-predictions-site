@@ -511,6 +511,8 @@ a:hover { text-decoration: underline; }
 .badge-blend { background: rgba(255,107,53,.18); color: var(--accent2); }
 .market-compare { display: flex; justify-content: space-between; gap: .5rem; flex-wrap: wrap; font-size: .74rem; color: var(--text-muted); margin: .35rem 0 .4rem; }
 .market-compare .active { color: var(--text); font-weight: 600; }
+.score-source { font-size: .72rem; color: var(--text-muted); margin: .3rem 0 .1rem; text-align: center; }
+.sim-caption { font-size: .74rem; color: var(--text-muted); margin: .2rem 0 .5rem; text-transform: uppercase; letter-spacing: .04em; }
 .forecast-legend { font-size: .8rem; color: var(--text-muted); margin: 0 0 1rem; }
 .forecast-legend .badge { margin: 0 .2rem; }
 .section-note { color: var(--text-muted); font-size: .8rem; margin-left: .75rem; }
