@@ -641,9 +641,33 @@ a:hover { text-decoration: underline; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
   max-height: 75vh;
-  overflow-y: auto;
+  overflow: auto;                      /* both axes: `hidden` then `overflow-y` left overflow-x hidden and clipped wide tables on phones */
+}
+
+.scroll-hint { display: none; }
+
+/* Phones: a wide table scrolls sideways inside its box instead of squeezing its columns or wrapping every cell. The page itself scrolls
+   vertically (no second, nested vertical scroller), rows stay on one line, and the rank and name columns stay in view. */
+@media (max-width: 640px) {
+  .rankings-table-wrap { max-height: none; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+  .rankings-table-wrap .data-table { font-size: .82rem; }
+  .rankings-table-wrap .data-table th,
+  .rankings-table-wrap .data-table td { padding: .5rem .65rem; white-space: nowrap; }
+  .scroll-hint { display: block; margin: 0 0 .4rem; font-size: .74rem; color: var(--text-muted); }
+  #player-table th:nth-child(1), #player-table td:nth-child(1) {
+    position: sticky; left: 0; z-index: 2; background: var(--surface);
+    box-sizing: border-box; width: 3.2rem; min-width: 3.2rem; max-width: 3.2rem;
+  }
+  #player-table th:nth-child(2), #player-table td:nth-child(2) {
+    position: sticky; left: 3.2rem; z-index: 2; background: var(--surface); box-shadow: 1px 0 0 var(--border);
+  }
+  #player-table th:nth-child(1), #player-table th:nth-child(2),
+  #teams-table th:nth-child(1) { background: var(--surface2); z-index: 3; }
+  #teams-table th:nth-child(1), #teams-table td:nth-child(1) {
+    position: sticky; left: 0; z-index: 2; background: var(--surface); box-shadow: 1px 0 0 var(--border);
+  }
+  #teams-table th:nth-child(1) { background: var(--surface2); z-index: 3; }
 }
 
 .data-table {

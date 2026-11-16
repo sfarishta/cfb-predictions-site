@@ -21,8 +21,6 @@ const state = {
   playerLimit: 50,       // 25 | 50 | 100 | 'all'
   pbpSource: 'actual',   // 'actual' (CFBD play log, names the players) | 'simulated'
   teams: {},             // school -> { logo, color, abbreviation, conference }
-  sortCol: null,
-  sortDir: 1,
 };
 
 // ---- DOM refs ----------------------------------------------------
@@ -31,6 +29,9 @@ const weekSelect = document.getElementById('week-select');
 const snapSelect = document.getElementById('snapshot-select');
 const navSeason = document.getElementById('nav-season');
 const syncBtn = document.getElementById('sync-cfbd-btn');
+// The sync button cannot work on the static site (GitHub Pages answers a POST with 405), and the export also strips it from the page. Remove
+// it here at once, before init() awaits anything, so it never flashes and never survives a failed init (review U1).
+if (syncBtn && typeof STATIC_MODE !== 'undefined' && STATIC_MODE) syncBtn.remove();
 
 function showToast(message, type = 'info', duration = 3500) {
   const container = document.getElementById('toast-container');
@@ -124,7 +125,8 @@ function setupControls() {
   });
   snapSelect.addEventListener('change', () => {
     const [snap, mode] = snapSelect.value.split('|');
-    state.currentSnapshot = parseInt(snap) || state.latestSnapshot;
+    const snapNum = parseInt(snap, 10);
+    state.currentSnapshot = Number.isNaN(snapNum) ? state.latestSnapshot : snapNum;
     state.forecastMode = mode === 'blend' ? 'blend' : 'free';
     try { localStorage.setItem('forecastMode', state.forecastMode); } catch { /* storage unavailable: keep in memory */ }
     if (state.currentPage === 'games') renderGames();
@@ -133,11 +135,7 @@ function setupControls() {
     else if (state.currentPage === 'players') renderPlayers();
   });
 
-  if (syncBtn && typeof STATIC_MODE !== 'undefined' && STATIC_MODE) {
-    syncBtn.style.display = 'none';
-  }
-
-  if (syncBtn) {
+  if (syncBtn && !(typeof STATIC_MODE !== 'undefined' && STATIC_MODE)) {
     syncBtn.addEventListener('click', async () => {
       syncBtn.disabled = true;
       const icon = syncBtn.querySelector('.sync-icon');
@@ -150,10 +148,10 @@ function setupControls() {
         if (!res.ok) throw new Error(data.detail || 'Failed to sync with CFBD');
 
         showToast(data.message || 'CFBD sync successful!', 'success');
-        // Refresh current page view with updated real scores
-        if (state.currentPage === 'games') renderGames();
-        else if (state.currentPage === 'postseason') renderPostseason();
-        else if (state.currentPage === 'pbp' && state.currentGameId) renderPBP(state.currentGameId);
+        // Refresh the current page with the updated real scores. The cached game card predates the sync, so the play-by-play page
+        // must fetch it again (review U11).
+        state.currentGameMeta = null;
+        rerenderCurrentPage();
       } catch (err) {
         showToast(`Sync error: ${err.message}`, 'error', 5000);
       } finally {
@@ -161,6 +159,19 @@ function setupControls() {
         if (icon) icon.classList.remove('spinning');
       }
     });
+  }
+}
+
+function rerenderCurrentPage() {
+  switch (state.currentPage) {
+    case 'games': return renderGames();
+    case 'postseason': return renderPostseason();
+    case 'rankings': return renderRankings();
+    case 'players': return renderPlayers();
+    case 'teams': return renderTeams();
+    case 'team': return state.currentTeamSlug ? renderTeam(state.currentTeamSlug) : undefined;
+    case 'pbp': return state.currentGameId ? renderPBP(state.currentGameId) : undefined;
+    default: return undefined;
   }
 }
 
@@ -239,7 +250,7 @@ function navigateTo(page, gameId = null, gameMeta = null, updateHash = true) {
 
   if (updateHash) {
     const week = gameMeta?.week;
-    const targetHash = gameId ? `#/${page}/${gameId}${week ? '/' + week : ''}` : `#/${page}`;
+    const targetHash = gameId ? `#/${page}/${gameId}${week != null && week !== '' ? '/' + week : ''}` : `#/${page}`;
     if (window.location.hash !== targetHash) {
       window.location.hash = targetHash;
     }
@@ -369,6 +380,11 @@ async function apiFetch(url) {
   return data;
 }
 
+// Every page render takes a token. A slow response for an earlier render (Week 9 asked for, then Week 10) finishes after a later render
+// has started; it checks the token and stops instead of painting over the newer page (review U2).
+let renderToken = 0;
+function beginRender() { return ++renderToken; }
+
 function showLoader() {
   app.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
 }
@@ -454,6 +470,7 @@ function forecastBadge(g) {
 // PAGE: GAMES
 // ----------------------------------------------------------------
 async function renderGames() {
+  const tok = beginRender();
   showLoader();
   const params = new URLSearchParams({
     week: state.currentWeek,
@@ -463,9 +480,11 @@ async function renderGames() {
   try {
     games = await apiFetch(`/api/games?${params}`);
   } catch (e) {
+    if (tok !== renderToken) return;
     app.innerHTML = `<div class="empty-state">No games found for Week ${state.currentWeek}.</div>`;
     return;
   }
+  if (tok !== renderToken) return;
 
   const completedCount = games.filter(g => g.completed).length;
   const ensembleCount = games.filter(g => g.has_ensemble).length;
@@ -523,7 +542,7 @@ function buildGameCard(g) {
   const winProb = blended ? g.blend_home_win_prob : g.home_win_prob;
   const homeWinPct = winProb !== null && winProb !== undefined
     ? Math.round(winProb * 100)
-    : (g.sim_margin >= 0 ? Math.min(95, 50 + Math.abs(g.sim_margin) * 1.5) : null);
+    : (g.sim_margin != null ? Math.round(Math.max(5, Math.min(95, 50 + g.sim_margin * 1.5))) : null);   // both signs: an away favourite keeps its bar
   const awayWinPct = homeWinPct !== null ? 100 - homeWinPct : null;
 
   const badge = isCompleted
@@ -593,6 +612,7 @@ function formatDate(iso) {
 // PAGE: PBP
 // ----------------------------------------------------------------
 async function renderPBP(gameId) {
+  const tok = beginRender();
   showLoader();
 
   let game = state.currentGameMeta ?? null;
@@ -612,6 +632,7 @@ async function renderPBP(gameId) {
       try { games = await apiFetch(`/api/games?${params}`); } catch {}
       game = games.find(g => g.game_id === gameId) ?? {};
     }
+    if (tok !== renderToken) return;
   }
 
   const targetWeek = game?.week ?? state.currentWeek;
@@ -622,27 +643,30 @@ async function renderPBP(gameId) {
     snapshot: state.currentSnapshot ?? '',
     source,
   });
-  if (!isPostseasonGame && targetWeek) {
+  if (!isPostseasonGame && targetWeek != null) {
     pbpParams.set('week', targetWeek);
   }
   let plays = [];
   try {
     plays = await apiFetch(`/api/games/${gameId}/pbp?${pbpParams}`);
   } catch {
+    if (tok !== renderToken) return;
     app.innerHTML = `<div class="empty-state">No play-by-play data available for this game.</div>`;
     return;
   }
+  if (tok !== renderToken) return;
 
   // Player box score for the selected source: official (CFBD) for actual plays, built from the attributed plays for simulated
   // ones. Games with neither fall back to team totals from their plays.
   let boxTeams = [];
-  if (source === 'simulated' || (game?.completed && targetWeek)) {
+  if (source === 'simulated' || (game?.completed && targetWeek != null)) {
     const boxParams = new URLSearchParams({ season: state.season, source });
     if (state.currentSnapshot != null) boxParams.set('snapshot', state.currentSnapshot);
-    if (!isPostseasonGame && targetWeek) boxParams.set('week', targetWeek);
+    if (!isPostseasonGame && targetWeek != null) boxParams.set('week', targetWeek);
     try {
       boxTeams = await apiFetch(`/api/games/${gameId}/boxscore?${boxParams}`);
     } catch { boxTeams = []; }
+    if (tok !== renderToken) return;
   }
 
   const drives = groupByDrive(plays);
@@ -1035,14 +1059,17 @@ function renderSimBox(plays, homeTeam, awayTeam, source) {
 // PAGE: POSTSEASON (CFP Bracket, Conference Championships, Bowls)
 // ----------------------------------------------------------------
 async function renderPostseason() {
+  const tok = beginRender();
   showLoader();
   let data;
   try {
     data = await apiFetch(`/api/postseason?snapshot=${state.currentSnapshot ?? ''}`);
   } catch (e) {
+    if (tok !== renderToken) return;
     app.innerHTML = `<div class="empty-state">No postseason simulation found for Season ${state.season}.</div>`;
     return;
   }
+  if (tok !== renderToken) return;
 
   const confGames = data.conference_championships ?? [];
   const tree = data.cfp_bracket ?? {};
@@ -1300,7 +1327,7 @@ function buildPostseasonCard(g, defaultTitle) {
     </div>
     <div class="win-prob-label">
       <span>${escHtml(g.away_team)} <strong>${awayWinPct}%</strong></span>
-      <span style="color:var(--text-muted);font-size:.72rem">Sim Win Prob</span>
+      <span style="color:var(--text-muted);font-size:.72rem" title="Logistic function of the simulated margin: the postseason has no model win probability">Win prob. from sim margin</span>
       <span><strong>${homeWinPct}%</strong> ${escHtml(g.home_team)}</span>
     </div>
     <div class="win-bar-wrap">
@@ -1327,15 +1354,18 @@ function buildPostseasonCard(g, defaultTitle) {
 // PAGE: RANKINGS (Teams)
 // ----------------------------------------------------------------
 async function renderRankings() {
+  const tok = beginRender();
   showLoader();
-  const weekParam = state.currentWeek ? `&week=${state.currentWeek}` : '';
+  const weekParam = Number.isInteger(state.currentWeek) ? `&week=${state.currentWeek}` : '';
   let rows;
   try {
     rows = await apiFetch(`/api/rankings/teams?snapshot=${state.currentSnapshot ?? ''}${weekParam}`);
   } catch {
+    if (tok !== renderToken) return;
     app.innerHTML = `<div class="empty-state">No team rankings available for Week ${state.currentWeek}.</div>`;
     return;
   }
+  if (tok !== renderToken) return;
   state.rankRows = rows;
   drawRankings();
 }
@@ -1371,7 +1401,7 @@ function drawRankings() {
   const sourceBadge = isEnsemble
     ? '<span class="badge badge-ensemble" title="Average of the five-seed ensemble for this week">Ensemble</span>'
     : '<span class="badge badge-single" title="Projected end-of-season ratings from the season simulation">Single seed · projected final</span>';
-  const weekLabel = state.currentWeek ? `(Week ${state.currentWeek})` : '';
+  const weekLabel = Number.isInteger(state.currentWeek) ? `(Week ${state.currentWeek})` : '';
   const viewTitles = {
     committee: ['Committee', 'Default view and the simulated playoff selection: the power rank and the résumé rank (wins above an elite benchmark) averaged 50/50'],
     power: ['Power', 'Ranked by the power rating (expected neutral margin vs an average FBS team); the predictive number'],
@@ -1547,13 +1577,14 @@ const POSITION_NOTES = {
 };
 
 async function renderPlayers() {
+  beginRender();
   showLoader();
 
   const posTabs = POSITIONS.map(p => `
     <button class="pos-tab${state.currentPos === p ? ' active' : ''}" data-pos="${p}">${p === 'all' ? 'All' : p}</button>
   `).join('');
 
-  const weekLabel = state.currentWeek ? ` (Week ${state.currentWeek})` : '';
+  const weekLabel = Number.isInteger(state.currentWeek) ? ` (Week ${state.currentWeek})` : '';
 
   app.innerHTML = `
     <div class="section-header">
@@ -1598,25 +1629,29 @@ async function renderPlayers() {
 }
 
 async function loadPlayerTable(pos) {
+  const tok = beginRender();                       // a quick second click on a position tab or the limit select supersedes the first
   const wrap = document.getElementById('player-table-wrap');
+  if (!wrap) return;
   const note = document.getElementById('pos-note');
   if (note) note.textContent = POSITION_NOTES[pos] || '';
   wrap.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
 
   let rows;
-  const weekParam = state.currentWeek ? `&week=${state.currentWeek}` : '';
+  const weekParam = Number.isInteger(state.currentWeek) ? `&week=${state.currentWeek}` : '';
   const limitParam = state.playerLimit !== 'all' ? `&limit=${state.playerLimit}` : '';
   try {
     rows = await apiFetch(
       `/api/rankings/players?snapshot=${state.currentSnapshot ?? ''}&pos=${pos}${weekParam}${limitParam}`
     );
   } catch {
+    if (tok !== renderToken) return;
     const message = state.currentWeek === 1
       ? 'No games have been played before Week 1, so there are no player ratings yet.'
       : `No data for position: ${escHtml(pos)}`;
     wrap.innerHTML = `<div class="empty-state">${message}</div>`;
     return;
   }
+  if (tok !== renderToken) return;
 
   const isEnsemble = rows[0]?.source === 'ensemble';
   const hasProj = !isEnsemble && rows.some(r => r.proj_cf_war !== undefined && r.proj_cf_war !== null && r.proj_cf_war !== '');
@@ -1636,6 +1671,7 @@ async function loadPlayerTable(pos) {
   }
 
   wrap.innerHTML = `
+    <p class="scroll-hint">Swipe sideways for more columns →</p>
     <div class="rankings-table-wrap">
       <table class="data-table" id="player-table">
         <thead><tr>
@@ -1665,14 +1701,15 @@ async function loadPlayerTable(pos) {
 // Offensive lines as units: results of the whole line, not a network output. The three measures are shown side by side and
 // never combined into one score.
 async function loadOlUnits(wrap) {
-  const weekParam = state.currentWeek ? `?week=${state.currentWeek}` : '';
+  const tok = renderToken;
+  const weekParam = Number.isInteger(state.currentWeek) ? `?week=${state.currentWeek}` : '';
   let rows;
   try {
     rows = await apiFetch(`/api/rankings/ol_units${weekParam}`);
   } catch {
     return;
   }
-  if (!rows.length) return;
+  if (tok !== renderToken || !rows.length) return;
   const through = rows[0].through_week;
   const section = document.createElement('div');
   section.innerHTML = `
@@ -1714,14 +1751,15 @@ async function loadOlUnits(wrap) {
 
 // Defensive fronts as units, the counterpart of the offensive line table: results of the whole front, not a network output.
 async function loadFrontUnits(wrap) {
-  const weekParam = state.currentWeek ? `?week=${state.currentWeek}` : '';
+  const tok = renderToken;
+  const weekParam = Number.isInteger(state.currentWeek) ? `?week=${state.currentWeek}` : '';
   let rows;
   try {
     rows = await apiFetch(`/api/rankings/dl_units${weekParam}`);
   } catch {
     return;
   }
-  if (!rows.length) return;
+  if (tok !== renderToken || !rows.length) return;
   const through = rows[0].through_week;
   const section = document.createElement('div');
   section.innerHTML = `
@@ -1811,17 +1849,26 @@ function populatePlayerTable(rows, opts = {}) {
 // ----------------------------------------------------------------
 // Sortable tables
 // ----------------------------------------------------------------
+// Sort state is kept per table (one global pair let a click in one table decide the next click's direction in another) and is applied
+// again whenever a table redraws its rows, so the header mark and the row order always agree (review U15).
+const tableSort = {};
+
+function applySort(table) {
+  const s = tableSort[table.id];
+  table.querySelectorAll('th').forEach(h => h.classList.toggle('sorted', Boolean(s) && h.dataset.col === s.col));
+  if (s) sortTable(table, s.col, s.dir);
+}
+
 function setupSortableTable(tableId) {
   const table = document.getElementById(tableId);
   if (!table) return;
+  delete tableSort[tableId];                       // a freshly built table starts in the order the server sent
   table.querySelectorAll('th[data-col]').forEach(th => {
     th.addEventListener('click', () => {
       const col = th.dataset.col;
-      if (state.sortCol === col) state.sortDir *= -1;
-      else { state.sortCol = col; state.sortDir = 1; }
-      table.querySelectorAll('th').forEach(h => h.classList.remove('sorted'));
-      th.classList.add('sorted');
-      sortTable(table, col, state.sortDir);
+      const prev = tableSort[tableId];
+      tableSort[tableId] = { col, dir: prev && prev.col === col ? prev.dir * -1 : 1 };
+      applySort(table);
     });
   });
 }
@@ -1876,14 +1923,17 @@ function performanceNote(z) {
 }
 
 async function renderTeams() {
+  const tok = beginRender();
   showLoader();
   let rows;
   try {
     rows = await apiFetch(`/api/team_index?season=${state.season}`);
   } catch {
+    if (tok !== renderToken) return;
     app.innerHTML = '<div class="empty-state">The Teams page is not available yet.</div>';
     return;
   }
+  if (tok !== renderToken) return;
   state.teamRows = rows;
   const confs = [...new Set(rows.map(r => r.conference).filter(Boolean))].sort();
   app.innerHTML = `
@@ -1892,6 +1942,7 @@ async function renderTeams() {
       <input id="team-search" type="search" placeholder="Search teams" aria-label="Search teams" />
       <select id="team-conf" aria-label="Conference"><option value="">All conferences</option>${confs.map(c => `<option>${escHtml(c)}</option>`).join('')}</select>
     </div>
+    <p class="scroll-hint">Swipe sideways for more columns →</p>
     <div class="rankings-table-wrap">
       <table class="data-table" id="teams-table">
         <thead><tr>
@@ -1925,6 +1976,7 @@ async function renderTeams() {
       <td class="${r.wins_minus_exp > 0 ? 'pos' : r.wins_minus_exp < 0 ? 'neg' : ''}">${fmtSigned(r.wins_minus_exp)}</td>
       <td>${r.next_opponent ? escHtml(`Wk ${r.next_week} ${r.next_opponent}`) : '—'}</td>
     </tr>`).join('');
+    applySort(document.getElementById('teams-table'));          // keep the chosen sort across a search or conference filter
   };
   draw();
   document.getElementById('team-search').addEventListener('input', draw);
@@ -1941,14 +1993,17 @@ function predictionCell(g) {
 }
 
 async function renderTeam(slug) {
+  const tok = beginRender();
   showLoader();
   let t;
   try {
     t = await apiFetch(`/api/team_page?team=${encodeURIComponent(slug)}&season=${state.season}`);
   } catch {
+    if (tok !== renderToken) return;
     app.innerHTML = '<div class="empty-state">No page for this team. <a href="#/teams">All teams</a></div>';
     return;
   }
+  if (tok !== renderToken) return;
   const r = t.ratings, p = t.performance, s = t.stats;
   const rankTxt = v => (v == null ? '—' : `#${v}`);
   const fmtDate = iso => {
