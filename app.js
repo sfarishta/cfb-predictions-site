@@ -368,9 +368,18 @@ async function apiFetch(url) {
   // A snapshot holds only the weeks it simulated; for the others the server reads the full-season run
   // (data_layer._scoresheet, _pbp_week), and the export stores those once under the `sfull` tag (export_static.py).
   const mapped = mapToStaticPath(url);
-  let res = await fetch(mapped.filePath);
   const fallback = mapped.filePath.replace(/_s\d+(?=[_.])/, '_sfull');
-  if (res.status === 404 && fallback !== mapped.filePath) res = await fetch(fallback);
+  const tryFetch = async (path) => { try { return await fetch(path); } catch (e) { return null; } };
+  let res = await tryFetch(mapped.filePath);
+  // A snapshot file the export pruned (byte-identical to its full-run twin) is a missing path. GitHub Pages answers a missing path
+  // with 404, but its CDN sometimes answers 503 for a while (seen 2026-11-22 on postseason/bracket_s12.json and games/w05_s12.json), which
+  // used to break every page that relied on the fallback. A 5xx or a network error gets one retry of the same file, then the full-run twin.
+  if (res && res.status >= 500 && fallback !== mapped.filePath) {
+    await new Promise(r => setTimeout(r, 400));
+    res = await tryFetch(mapped.filePath);
+  }
+  if ((!res || !res.ok) && fallback !== mapped.filePath) res = await tryFetch(fallback);
+  if (!res) throw new Error(`Static data unreachable: ${mapped.filePath}`);
   if (!res.ok) throw new Error(`Static data not found ${res.status}: ${mapped.filePath}`);
   let data = await res.json();
 
